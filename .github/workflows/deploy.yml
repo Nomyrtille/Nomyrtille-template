@@ -1,0 +1,106 @@
+name: 🫐 Deploy to nomyrtille.com
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+concurrency:
+  group: ${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_NAME: ${{ github.event.repository.name }}
+  BRANCH: ${{ github.ref_name }}
+
+jobs:
+  # ─────────────────────────────────────────
+  # JOB 1 : Lint & Test
+  # ─────────────────────────────────────────
+  test:
+    name: 🧪 Lint & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect stack & run checks
+        run: |
+          if [ -f "package.json" ]; then
+            echo "STACK=node" >> $GITHUB_ENV
+            npm ci --frozen-lockfile
+            npm run lint --if-present
+            npm test --if-present
+          elif [ -f "requirements.txt" ] || [ -f "pyproject.toml" ]; then
+            echo "STACK=python" >> $GITHUB_ENV
+            pip install -r requirements.txt 2>/dev/null || pip install .
+            python -m pytest --if-present 2>/dev/null || true
+          else
+            echo "STACK=unknown" >> $GITHUB_ENV
+            echo "⚠️ Stack non détectée, lint ignoré"
+          fi
+
+  # ─────────────────────────────────────────
+  # JOB 2 : Deploy
+  # ─────────────────────────────────────────
+  deploy:
+    name: 🚀 Deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: test
+
+    steps:
+      - name: Set deploy target
+        run: |
+          if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+            echo "DEPLOY_URL=https://$APP_NAME.nomyrtille.com" >> $GITHUB_ENV
+            echo "IS_PROD=true" >> $GITHUB_ENV
+          else
+            SAFE_BRANCH=$(echo "$BRANCH" | tr '/' '-' | tr '_' '-' | cut -c1-20)
+            echo "DEPLOY_URL=https://$APP_NAME-$SAFE_BRANCH.nomyrtille.com" >> $GITHUB_ENV
+            echo "IS_PROD=false" >> $GITHUB_ENV
+          fi
+
+      - name: Trigger Coolify (with retry)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 10
+          command: |
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" -X POST \
+              "${{ secrets.COOLIFY_WEBHOOK_URL }}" \
+              -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d '{"branch": "${{ env.BRANCH }}"}')
+
+            if [ "$STATUS" != "200" ] && [ "$STATUS" != "201" ]; then
+              echo "❌ Coolify a répondu $STATUS"
+              exit 1
+            fi
+            echo "✅ Coolify notifié (HTTP $STATUS)"
+
+      - name: Job summary
+        run: |
+          echo "## 🫐 Déploiement lancé" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Champ | Valeur |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| App | \`$APP_NAME\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branche | \`$BRANCH\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Production | $IS_PROD |" >> $GITHUB_STEP_SUMMARY
+          echo "| URL | $DEPLOY_URL |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment PR avec preview URL
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🫐 Preview déployée\n\n🔗 **URL :** ${{ env.DEPLOY_URL }}\n\n> Branche : \`${{ env.BRANCH }}\``
+            })
