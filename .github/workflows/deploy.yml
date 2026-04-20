@@ -16,12 +16,31 @@ env:
 
 jobs:
   # ─────────────────────────────────────────
-  # JOB 1 : Lint & Test
+  # JOB 1 : Scan secrets
+  # ─────────────────────────────────────────
+  security:
+    name: 🔍 Scan secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─────────────────────────────────────────
+  # JOB 2 : Lint & Test
   # ─────────────────────────────────────────
   test:
     name: 🧪 Lint & Test
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: security
 
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +62,7 @@ jobs:
           fi
 
   # ─────────────────────────────────────────
-  # JOB 2 : Deploy
+  # JOB 3 : Deploy
   # ─────────────────────────────────────────
   deploy:
     name: 🚀 Deploy
